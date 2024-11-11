@@ -17,7 +17,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-20.04, windows-2019, macos-11]
-        python-version: ["3.8", "3.9", "3.10"]
+        python-version: ["3.8", "3.9", "3.10", "3.11"]
     steps:
     - uses: actions/checkout@v2
     - name: Set up python ${{matrix.python-version}}
@@ -25,6 +25,10 @@ jobs:
       with:
         python-version: ${{matrix.python-version}}
         cache: 'pip'
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install pybind11>=2.6 numpy>=1.21 scipy>=1.7  # Install required dependencies
     - name: Install package
       run: pip install -e .
     - name: Install test dependencies

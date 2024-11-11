@@ -15,12 +15,20 @@
 //  Markus Friedl (Markus.Friedl@cern.ch)
 //
 //  Adaption for Python by David-Leon Pohl, pohl@physik.uni-bonn.de
+//  Adaption for pybind11 by Bong-Hwi Lim, bong-hwi.lim@cern.ch
 
-#pragma once
+#include <pybind11/pybind11.h>
+#include <pybind11/numpy.h>
 #include <cmath>
+#include <stdexcept>
+#include <tuple>
+#include <iostream>
 
-const double invsq2pi = 0.3989422804014;   // (2 pi)^(-1/2)
+namespace py = pybind11;
+// Constants
+const double invsq2pi = 0.3989422804014; // (2 pi)^(-1/2)
 
+// Function prototypes
 double landauPDF(const double& x, const double& x0, const double& xi)  // same algorithm is used in GSL
 {
 	static double p1[5] =
@@ -153,20 +161,133 @@ double landauGaussPDF(const double& x, const double& mu, const double& eta, cons
 	return (step * sum);
 }
 
-double* getLandauPDFData(double*& data, const unsigned int& size, const double& mu, const double& eta)
-{
-	double* result = new double[size];
-	for (unsigned int i = 0; i < size; ++i) {
-		result[i] = landauPDF(data[i], mu, eta);
-	}
-	return result;
+// Modified to take a simple pointer (double* data) rather than a reference to a pointer (double*& data)
+// This simplifies compatibility with pybind11 by reading data directly without modifying the original pointer
+double* getLandauPDFData(double* data, const unsigned int& size, const double& mu, const double& eta) {
+	// 
+    double* result = new double[size];
+    for (unsigned int i = 0; i < size; ++i) {
+        result[i] = landauPDF(data[i], mu, eta);
+    }
+    return result;
 }
 
-double* getLangauPDFData(double*& data, const unsigned int& size, const double& mu, const double& eta, const double& sigma)
-{
-	double* result = new double[size];
-	for (unsigned int i = 0; i < size; ++i) {
-		result[i] = landauGaussPDF(data[i], mu, eta, sigma);
-	}
-	return result;
+// Modified to take a simple pointer (double* data) rather than a reference to a pointer (double*& data)
+// This simplifies compatibility with pybind11 by reading data directly without modifying the original pointer
+double* getLangauPDFData(double* data, const unsigned int& size, const double& mu, const double& eta, const double& sigma) {
+    double* result = new double[size];
+    for (unsigned int i = 0; i < size; ++i) {
+        result[i] = landauGaussPDF(data[i], mu, eta, sigma);
+    }
+    return result;
+}
+
+// Helper function to convert C++ array to NumPy array
+py::array_t<double> data_to_numpy_array_double(double* ptr, size_t N) {
+    py::array_t<double> arr(N, ptr);
+    delete[] ptr; // Clean up allocated memory
+    return arr;
+}
+
+// Helper function to check and adjust parameters
+std::tuple<double, double, double, double> check_parameter(double mpv, double eta, double sigma, double A = 1.0) {
+    if (eta < 1e-9) {
+        std::cerr << "Warning: eta < 1e-9 is not supported. Setting eta to 1e-9." << std::endl;
+        eta = 1e-9;
+    }
+    if (sigma < 0) sigma *= -1;
+    if (sigma > 100 * eta) {
+        std::cerr << "Warning: sigma > 100 * eta can lead to oscillations. Check result." << std::endl;
+    }
+    if (A < 0.0) throw std::invalid_argument("A must be >= 0");
+    return std::make_tuple(mpv, eta, sigma, A);
+}
+
+// Placeholder _scale_to_mpv function for optimization
+std::tuple<double, double, double, double> scale_to_mpv(double mu, double eta, double sigma = 0.0, double A = 1.0) {
+    double mpv_scaled = mu;  // Placeholder: replace with actual optimization if necessary
+    double A_scaled = A;
+    return std::make_tuple(mpv_scaled, eta, sigma, A_scaled);
+}
+
+// Single-value PDF functions
+double get_landau_pdf(double value, double mu = 0, double eta = 1) {
+    return landauPDF(value, mu, eta);
+}
+
+double get_gauss_pdf(double value, double mu = 0, double sigma = 1) {
+    return gaussPDF(value, mu, sigma);
+}
+
+double get_langau_pdf(double value, double mu = 0, double eta = 1, double sigma = 1) {
+    return landauGaussPDF(value, mu, eta, sigma);
+}
+
+// Array-based Landau PDF computation
+py::array_t<double> landau_pdf(py::array_t<double> input, double mu = 0, double eta = 1) {
+    auto buf = input.request();
+    double* ptr = static_cast<double*>(buf.ptr);
+    size_t size = buf.size;
+    double* result = getLandauPDFData(ptr, size, mu, eta);
+    return data_to_numpy_array_double(result, size);
+}
+
+// Array-based Langau PDF computation
+py::array_t<double> langau_pdf(py::array_t<double> input, double mu = 0, double eta = 1, double sigma = 1) {
+    auto buf = input.request();
+    double* ptr = static_cast<double*>(buf.ptr);
+    size_t size = buf.size;
+    double* result = getLangauPDFData(ptr, size, mu, eta, sigma);
+    return data_to_numpy_array_double(result, size);
+}
+
+// The `landau` function that applies amplitude scaling
+py::array_t<double> landau(py::array_t<double> array, double mpv = 0, double eta = 1, double A = 1) {
+    if (A == 0) return py::array_t<double>(array.size()); // Return zeroed array if A == 0
+
+    auto [mpv_corrected, eta_corrected, sigma_corrected, A_corrected] = check_parameter(mpv, eta, 0, A);
+    auto [mpv_scaled, eta_scaled, sigma_scaled, A_scaled] = scale_to_mpv(mpv_corrected, eta_corrected, 0, A_corrected);
+
+    py::array_t<double> result = landau_pdf(array, mpv_scaled, eta_scaled);
+    auto result_mut = result.mutable_unchecked<1>(); // Specify 1 for 1D array
+
+    for (ssize_t i = 0; i < result_mut.size(); ++i) {
+        result_mut(i) *= A_scaled;
+    }
+    return result;
+}
+
+// The `langau` function that applies amplitude scaling
+py::array_t<double> langau(py::array_t<double> array, double mpv = 0, double eta = 1, double sigma = 1, double A = 1, bool scale_langau = true) {
+    if (A == 0) return py::array_t<double>(array.size()); // Return zeroed array if A == 0
+
+    auto [mpv_corrected, eta_corrected, sigma_corrected, A_corrected] = check_parameter(mpv, eta, sigma, A);
+
+    double mpv_scaled, A_scaled;
+    if (scale_langau) {
+        std::tie(mpv_scaled, std::ignore, std::ignore, A_scaled) = scale_to_mpv(mpv_corrected, eta_corrected, sigma_corrected, A_corrected);
+    } else {
+        std::tie(mpv_scaled, std::ignore, std::ignore, A_scaled) = scale_to_mpv(mpv_corrected, eta_corrected, 0, A_corrected);
+    }
+
+    py::array_t<double> result = langau_pdf(array, mpv_scaled, eta_corrected, sigma_corrected);
+    auto result_mut = result.mutable_unchecked<1>(); // Specify 1 for 1D array
+
+    for (ssize_t i = 0; i < result_mut.size(); ++i) {
+        result_mut(i) *= A_scaled;
+    }
+    return result;
+}
+
+// Define the pybind11 module
+PYBIND11_MODULE(pylandau, m) {
+    m.def("get_landau_pdf", &get_landau_pdf, "Single value Landau PDF", py::arg("value"), py::arg("mu") = 0, py::arg("eta") = 1);
+    m.def("get_gauss_pdf", &get_gauss_pdf, "Single value Gaussian PDF", py::arg("value"), py::arg("mu") = 0, py::arg("sigma") = 1);
+    m.def("get_langau_pdf", &get_langau_pdf, "Single value Landau-Gauss PDF", py::arg("value"), py::arg("mu") = 0, py::arg("eta") = 1, py::arg("sigma") = 1);
+    m.def("landau_pdf", &landau_pdf, "Array-based Landau PDF", py::arg("input"), py::arg("mu") = 0, py::arg("eta") = 1);
+    m.def("langau_pdf", &langau_pdf, "Array-based Langau PDF", py::arg("input"), py::arg("mu") = 0, py::arg("eta") = 1, py::arg("sigma") = 1);
+    m.def("check_parameter", &check_parameter, "Check and adjust parameters", py::arg("mpv"), py::arg("eta"), py::arg("sigma"), py::arg("A") = 1.0);
+    m.def("scale_to_mpv", &scale_to_mpv, "Scale function to maximum probable value", py::arg("mu"), py::arg("eta"), py::arg("sigma") = 0.0, py::arg("A") = 1.0);
+    m.def("landau", &landau, "Higher-level Landau function", py::arg("array"), py::arg("mpv") = 0, py::arg("eta") = 1, py::arg("A") = 1);
+    m.def("langau", &langau, "Higher-level Langau function", py::arg("array"), py::arg("mpv") = 0, py::arg("eta") = 1, py::arg("sigma") = 1, py::arg("A") = 1, py::arg("scale_langau") = true);
 }
